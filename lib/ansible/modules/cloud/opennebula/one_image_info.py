@@ -37,7 +37,7 @@ description:
   - This module was called C(one_image_facts) before Ansible 2.9. The usage did not change.
 version_added: "2.6"
 requirements:
-  - pyone
+  - python-oca
 options:
   api_url:
     description:
@@ -66,7 +66,6 @@ options:
       - See examples for more details.
 author:
     - "Milan Ilic (@ilicmilan)"
-    - "Jan Meerkamp (@meerkampdvv)"
 '''
 
 EXAMPLES = '''
@@ -143,149 +142,105 @@ images:
             sample: 7
 '''
 
-try:
-    import pyone
-    HAS_PYONE = True
-except ImportError:
-    HAS_PYONE = False
-
-from ansible.module_utils.basic import AnsibleModule
-import os
+from ansible.module_utils.opennebula import OpenNebulaModule
 
 
-def get_all_images(client):
-    pool = client.imagepool.info(-2, -1, -1, -1)
-    # Filter -2 means fetch all images user can Use
-
-    return pool
+IMAGE_STATES = ['INIT', 'READY', 'USED', 'DISABLED', 'LOCKED', 'ERROR',
+                'CLONE', 'DELETE', 'USED_PERS', 'LOCKED_USED',
+                'LOCKED_USED_PERS']
 
 
-IMAGE_STATES = ['INIT', 'READY', 'USED', 'DISABLED', 'LOCKED', 'ERROR', 'CLONE', 'DELETE', 'USED_PERS', 'LOCKED_USED', 'LOCKED_USED_PERS']
+class ImageInfoModule(OpenNebulaModule):
+
+    def __init__(self):
+        argument_spec = {
+            "ids": { "required": False, "aliases": ['id'], "type":  "list" },
+            "name": { "required": False, "type":  "str"},
+        }
+
+        mutually_exclusive = [['ids', 'name']]
+
+        OpenNebulaModule.__init__(self, argument_spec,
+                                  mutually_exclusive=mutually_exclusive)
+
+        OpenNebulaModule.__init__(self, argument_spec)
+
+    def get_all_images(self, one):
+        pool = one.imagepool.info(-2,-1,-1).IMAGE
+        return pool
+
+    def get_image_info(self, image):
+        info = {
+            'id': image.ID,
+            'name': image.NAME,
+            'state': IMAGE_STATES[image.STATE],
+            'running_vms': len(image.VMS.ID),
+            'used': bool(len(image.VMS.ID)),
+            'user_name': image.UNAME,
+            'user_id': image.UID,
+            'group_name': image.GNAME,
+            'group_id': image.GID,
+        }
+
+        return info
+
+    def get_images_by_ids(self, pool, ids):
+
+        images = []
+        for image in pool:
+            if str(image.ID) in ids:
+                images.append(self.get_image_info(image))
+
+        if len(images) == 0:
+            self.fail('There is no IMAGE(s) with id(s)= %s' % (ids))
+
+        return images
 
 
-def get_image_info(image):
-    info = {
-        'id': image.ID,
-        'name': image.NAME,
-        'state': IMAGE_STATES[image.STATE],
-        'running_vms': image.RUNNING_VMS,
-        'used': bool(image.RUNNING_VMS),
-        'user_name': image.UNAME,
-        'user_id': image.UID,
-        'group_name': image.GNAME,
-        'group_id': image.GID,
-    }
-    return info
+    def get_images_by_name(self, pool, name_pattern):
 
+        images = []
+        pattern = None
 
-def get_images_by_ids(module, client, ids):
-    images = []
-    pool = get_all_images(client)
+        if name_pattern.startswith('~'):
+            import re
+            if name_pattern[1] == '*':
+                pattern = re.compile(name_pattern[2:], re.IGNORECASE)
+            else:
+                pattern = re.compile(name_pattern[1:])
 
-    for image in pool.IMAGE:
-        if str(image.ID) in ids:
-            images.append(image)
-            ids.remove(str(image.ID))
-            if len(ids) == 0:
+        for image in pool:
+            if pattern is not None:
+                if pattern.match(image.NAME):
+                    images.append(self.get_image_info(image))
+            elif name_pattern == image.NAME:
+                images.append(self.get_image_info(image))
                 break
 
-    if len(ids) > 0:
-        module.fail_json(msg='There is no IMAGE(s) with id(s)=' + ', '.join('{id}'.format(id=str(image_id)) for image_id in ids))
+        # if the specific name is indicated
+        if pattern is None and len(images) == 0:
+            self.fail("There is no IMAGE with name=" + name_pattern)
 
-    return images
-
-
-def get_images_by_name(module, client, name_pattern):
-
-    images = []
-    pattern = None
-
-    pool = get_all_images(client)
-
-    if name_pattern.startswith('~'):
-        import re
-        if name_pattern[1] == '*':
-            pattern = re.compile(name_pattern[2:], re.IGNORECASE)
-        else:
-            pattern = re.compile(name_pattern[1:])
-
-    for image in pool.IMAGE:
-        if pattern is not None:
-            if pattern.match(image.NAME):
-                images.append(image)
-        elif name_pattern == image.NAME:
-            images.append(image)
-            break
-
-    # if the specific name is indicated
-    if pattern is None and len(images) == 0:
-        module.fail_json(msg="There is no IMAGE with name=" + name_pattern)
-
-    return images
+        return images
 
 
-def get_connection_info(module):
+    def run(self, one, module, result):
 
-    url = module.params.get('api_url')
-    username = module.params.get('api_username')
-    password = module.params.get('api_password')
+        pool = self.get_all_images(one)
 
-    if not url:
-        url = os.environ.get('ONE_URL')
+        if self.is_parameter('ids'):
+            ids = self.get_parameter('ids')
+            result['images'] = self.get_images_by_ids(pool, ids)
 
-    if not username:
-        username = os.environ.get('ONE_USERNAME')
+        if self.is_parameter('name'):
+            name = self.get_parameter('name')
+            result['images'] = self.get_images_by_name(pool, name)
 
-    if not password:
-        password = os.environ.get('ONE_PASSWORD')
-
-    if not(url and username and password):
-        module.fail_json(msg="One or more connection parameters (api_url, api_username, api_password) were not specified")
-    from collections import namedtuple
-
-    auth_params = namedtuple('auth', ('url', 'username', 'password'))
-
-    return auth_params(url=url, username=username, password=password)
+        self.exit()
 
 
 def main():
-    fields = {
-        "api_url": {"required": False, "type": "str"},
-        "api_username": {"required": False, "type": "str"},
-        "api_password": {"required": False, "type": "str", "no_log": True},
-        "ids": {"required": False, "aliases": ['id'], "type": "list"},
-        "name": {"required": False, "type": "str"},
-    }
-
-    module = AnsibleModule(argument_spec=fields,
-                           mutually_exclusive=[['ids', 'name']],
-                           supports_check_mode=True)
-    if module._name == 'one_image_facts':
-        module.deprecate("The 'one_image_facts' module has been renamed to 'one_image_info'", version='2.13')
-
-    if not HAS_PYONE:
-        module.fail_json(msg='This module requires pyone to work!')
-
-    auth = get_connection_info(module)
-    params = module.params
-    ids = params.get('ids')
-    name = params.get('name')
-    client = pyone.OneServer(auth.url, session=auth.username + ':' + auth.password)
-
-    result = {'images': []}
-    images = []
-
-    if ids:
-        images = get_images_by_ids(module, client, ids)
-    elif name:
-        images = get_images_by_name(module, client, name)
-    else:
-        images = get_all_images(client).IMAGE
-
-    for image in images:
-        result['images'].append(get_image_info(image))
-
-    module.exit_json(**result)
+    ImageInfoModule().run_module()
 
 
 if __name__ == '__main__':
