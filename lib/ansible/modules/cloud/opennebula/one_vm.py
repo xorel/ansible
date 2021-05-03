@@ -655,7 +655,13 @@ def get_vm_info(client, vm):
 
     if hasattr(vm.template, 'nics'):
         for nic in vm.template.nics:
-            networks_info.append({'ip': nic.ip, 'mac': nic.mac, 'name': nic.network, 'security_groups': nic.security_groups})
+            networks_info.append({
+                'ip': nic.get('ip', ''),
+                'mac': nic.get('mac', ''),
+                'name': nic.get('network', ''),
+                'security_groups': nic.get('security_groups', '')
+            })
+
     import time
 
     current_time = time.localtime()
